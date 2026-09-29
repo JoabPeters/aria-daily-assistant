@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Aria — Daily Life Assistant (Alexa+ Simulation)</title>
+<style>
+  :root{
+    --bg:#0f1220; --card:#1a1e33; --accent:#7c9fff; --text:#eef0ff;
+    --muted:#9aa1c4; --bubble-user:#2a3050; --bubble-ai:#2f3a63; --ok:#5ed6a4;
+  }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --bg:#f4f5fb; --card:#ffffff; --accent:#4a63e0; --text:#1c1f33;
+      --muted:#5c6180; --bubble-user:#e7ebff; --bubble-ai:#eef1ff; --ok:#1c9c6c;
+    }
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    display:flex; flex-direction:column;
+    padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+  }
+  header{
+    padding:16px 20px; text-align:center; border-bottom:1px solid rgba(128,128,128,.2);
+    padding-top:calc(16px + env(safe-area-inset-top,0px));
+  }
+  header h1{margin:0; font-size:1.2rem;}
+  header p{margin:4px 0 0; color:var(--muted); font-size:.85rem;}
+  main{flex:1; display:flex; overflow:hidden;}
+  #chat{flex:2; display:flex; flex-direction:column; padding:16px; overflow-y:auto; min-width:0;}
+  #panel{flex:1; border-left:1px solid rgba(128,128,128,.2); padding:16px; overflow-y:auto; min-width:220px;}
+  #panel h2{font-size:.95rem; margin:0 0 10px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em;}
+  .item{background:var(--card); border-radius:10px; padding:10px 12px; margin-bottom:8px; font-size:.9rem;}
+  .item.done{opacity:.5; text-decoration:line-through;}
+  .msg{max-width:80%; padding:10px 14px; border-radius:14px; margin-bottom:10px; font-size:.95rem; line-height:1.4; white-space:pre-wrap;}
+  .msg.user{align-self:flex-end; background:var(--bubble-user); border-bottom-right-radius:4px;}
+  .msg.ai{align-self:flex-start; background:var(--bubble-ai); border-bottom-left-radius:4px;}
+  .row{display:flex; flex-direction:column;}
+  #inputRow{display:flex; gap:8px; padding:14px 16px; border-top:1px solid rgba(128,128,128,.2);}
+  #inputRow input{
+    flex:1; padding:12px 14px; border-radius:10px; border:1px solid rgba(128,128,128,.3);
+    background:var(--card); color:var(--text); font-size:1rem;
+  }
+  #inputRow button{
+    padding:12px 18px; border:none; border-radius:10px; background:var(--accent); color:#fff;
+    font-weight:600; cursor:pointer; font-size:1rem;
+  }
+  #inputRow button:disabled{opacity:.5; cursor:default;}
+  .thinking{color:var(--muted); font-style:italic;}
+  .empty{color:var(--muted); font-size:.85rem;}
+  @media (max-width:640px){ #panel{display:none;} }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎙️ Aria — Your Daily Life Assistant</h1>
+  <p>Simulated Alexa+ experience · reminders, to-dos & schedule</p>
+</header>
+<main>
+  <div id="chat" class="row"></div>
+  <div id="panel">
+    <h2>Today's List</h2>
+    <div id="items"></div>
+  </div>
+</main>
+<div id="inputRow">
+  <input id="textInput" type="text" placeholder='Try: "remind me to call mum at 6pm"' autocomplete="off">
+  <button id="sendBtn">Send</button>
+</div>
+
+<script>
+let sample = null;
+let reminders = []; // {id, text, time, done}
+let nextId = 1;
+
+const chat = document.getElementById('chat');
+const itemsEl = document.getElementById('items');
+const input = document.getElementById('textInput');
+const sendBtn = document.getElementById('sendBtn');
+
+function addMsg(text, who){
+  const d = document.createElement('div');
+  d.className = 'msg ' + who;
+  d.textContent = text;
+  chat.appendChild(d);
+  chat.scrollTop = chat.scrollHeight;
+  return d;
+}
+
+function renderItems(){
+  itemsEl.innerHTML = '';
+  if(reminders.length === 0){
+    itemsEl.innerHTML = '<div class="empty">Nothing yet — ask Aria to remind you of something.</div>';
+    return;
+  }
+  reminders.forEach(r => {
+    const div = document.createElement('div');
+    div.className = 'item' + (r.done ? ' done' : '');
+    div.textContent = (r.time ? '[' + r.time + '] ' : '') + r.text;
+    itemsEl.appendChild(div);
+  });
+}
+
+const SYSTEM_PROMPT = `You are Aria, the reasoning core behind a simulated Alexa+ daily-life assistant.
+Given the user's message and their current reminder list (as JSON), decide what to do.
+Respond with ONLY valid JSON, no markdown fences, no commentary, in this exact shape:
+{
+  "action": "add" | "list" | "complete" | "none",
+  "text": "short description of the reminder/task (for add or complete, best-match)",
+  "time": "time or date phrase if mentioned, else empty string",
+  "reply": "a short, friendly, natural spoken-style reply as Aria would say it out loud"
+}
+Rules:
+- "add": user wants a new reminder/to-do added.
+- "list": user is asking what's on their list / schedule / due today.
+- "complete": user says something is done/finished, match it to the closest existing item's text.
+- "none": greetings, chit-chat, or anything not related to reminders.
+Keep "reply" under 30 words, conversational, like a voice assistant speaking.`;
+
+async function handleSend(){
+  const text = input.value.trim();
+  if(!text) return;
+  input.value = '';
+  sendBtn.disabled = true;
+  addMsg(text, 'user');
+  const thinking = addMsg('Aria is thinking…', 'ai');
+  thinking.classList.add('thinking');
+
+  try{
+    if(!sample){
+      sample = await claude.use('sample');
+    }
+    if(!sample){
+      thinking.textContent = "I can't reach my AI brain right now (sample capability unavailable in this view).";
+      thinking.classList.remove('thinking');
+      sendBtn.disabled = false;
+      return;
+    }
+
+    const payload = {
+      role: 'user',
+      content: `${SYSTEM_PROMPT}\n\nCurrent list: ${JSON.stringify(reminders)}\n\nUser message: "${text}"`
+    };
+    const result = await sample.json([payload]);
+
+    let action = result && result.action ? result.action : 'none';
+    let reply = result && result.reply ? result.reply : "Okay.";
+
+    if(action === 'add'){
+      reminders.push({id: nextId++, text: result.text || text, time: result.time || '', done:false});
+    } else if(action === 'complete'){
+      const target = (result.text || '').toLowerCase();
+      const match = reminders.find(r => !r.done && r.text.toLowerCase().includes(target));
+      if(match) match.done = true;
+    }
+    // 'list' and 'none' just use the reply text; panel always reflects current state
+
+    thinking.classList.remove('thinking');
+    thinking.textContent = reply;
+    renderItems();
+  }catch(err){
+    thinking.classList.remove('thinking');
+    thinking.textContent = "Sorry, I hit an error understanding that. Try rephrasing?";
+    console.error(err);
+  }finally{
+    sendBtn.disabled = false;
+    input.focus();
+  }
+}
+
+sendBtn.addEventListener('click', handleSend);
+input.addEventListener('keydown', e => { if(e.key === 'Enter') handleSend(); });
+
+renderItems();
+addMsg("Hi, I'm Aria. Ask me to remind you of something, tell you what's on your list, or say you've finished a task.", 'ai');
+</script>
+</body>
+</html>
